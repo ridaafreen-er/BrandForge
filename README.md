@@ -34,3 +34,7 @@ Frontend: NEXT_PUBLIC_API_URL (backend URL).
 | Export | ZIP: campaign.json, report.md, copy/*.txt, visual prompts, audio | same |
 
 Not built: Postgres/pgvector, Redis, auth, social publishing.
+<<<<<<< HEAD
+=======
+>>>>>>> 2a72939 (Committing the draft)
+>>>>>>> 818904a (Fix CORS middleware settings and update backend API URL)
