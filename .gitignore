@@ -1,0 +1,5 @@
+node_modules/
+.next/
+backend/data/
+.env
+__pycache__/

@@ -1,0 +1,9 @@
+@tailwind base; @tailwind components; @tailwind utilities;
+html { background: #0C0F14; color: #E6EBF2; }
+body { font-family: var(--font-body), sans-serif; }
+.btn { @apply rounded-lg px-4 py-2 text-sm font-semibold transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-ember disabled:opacity-40; }
+.btn-primary { @apply btn bg-ember text-ink hover:brightness-110; }
+.btn-ghost { @apply btn border border-line text-[#E6EBF2] hover:bg-panel; }
+.inp { @apply w-full rounded-lg border border-line bg-ink px-3 py-2 text-sm outline-none focus:border-steel; }
+.lbl { @apply mb-1 block text-xs font-medium text-mute; }
+@media (prefers-reduced-motion: reduce) { * { animation: none !important; } }
