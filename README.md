@@ -1,40 +1,37 @@
 # BrandForge
-One brand idea in. Publish-ready content for every platform out.
+
+AI content studio for brands and creators.
 
 ## Run locally
+
 Backend (Python 3.11+):
-    cd backend && python -m venv .venv && source .venv/bin/activate
-    pip install -r requirements.txt
-    cp .env.example .env   # optional, then export the vars or use `set -a; source .env; set +a`
-    uvicorn main:app --reload --port 8000 --env-file .env
+
+```powershell
+cd backend
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+Copy-Item .env.example .env
+uvicorn main:app --reload --port 8000 --env-file .env
+```
 
 Frontend (Node 18+):
-    cd frontend && npm install
-    cp .env.example .env.local
-    npm run dev            # http://localhost:3000
 
-Click "Try live demo" on the landing page.
+```powershell
+cd frontend
+npm install
+Copy-Item .env.example .env.local
+npm run dev
+```
 
-## Environment variables
-Backend: GROQ_API_KEY / GROQ_MODEL, GEMINI_API_KEY / GEMINI_MODEL, OPENROUTER_API_KEY / OPENROUTER_MODEL, or OPENAI_API_KEY / OPENAI_MODEL; GEMINI_API_KEY enables Gemini text-to-speech and can refine image prompts (GEMINI_IMAGE_PROMPT_MODEL); carousel images use Pollinations (optional POLLINATIONS_API_KEY / POLLINATIONS_IMAGE_MODEL); DATA_DIR (SQLite + media), CORS_ORIGINS (your frontend URL).
-Frontend: NEXT_PUBLIC_API_URL (backend URL).
+Open http://localhost:3000 and register an account. Passwords are stored as PBKDF2 hashes. Login uses an HttpOnly server-side session cookie. Campaigns, assets, and publishing demo history are scoped to the signed-in user. Existing anonymous records are not assigned to new accounts.
 
-## Deploy
-- Backend: Render/Railway/Fly using backend/Dockerfile. Mount a persistent disk at DATA_DIR. Set CORS_ORIGINS to the frontend URL.
-- Frontend: Vercel, root directory `frontend`, set NEXT_PUBLIC_API_URL.
+## Configuration
 
-## What is real vs fallback
-| Feature | With API key | Without |
-|---|---|---|
-| Brand kit, plan, 6 assets, critic, regenerate, rewrite buttons | LLM (Groq, Gemini, OpenRouter, or OpenAI) | Labelled demo engine: templates filled from the brand context + rule-based critic |
-| Voiceover | Gemini TTS WAV, included in export | Script shown, clear "not configured" message |
-| Images | Gemini-refined prompts + Pollinations-generated Instagram carousel images, included in the UI and export | Text prompts and branded placeholders |
-| Video | Not implemented: storyboards are shown on branded cards | same |
-| Storage | SQLite (brands double as reusable brand memory via GET /api/brands) | same |
-| Export | ZIP: campaign.json, report.md, copy/*.txt, visual prompts, audio | same |
+Set `CORS_ORIGINS` to the exact frontend origin(s), comma-separated. For a production frontend and backend on separate domains, set `SESSION_COOKIE_SECURE=true` and `SESSION_COOKIE_SAMESITE=none`; HTTPS is required. Local development uses `SESSION_COOKIE_SECURE=false` and `SESSION_COOKIE_SAMESITE=lax`.
 
-Not built: Postgres/pgvector, Redis, auth, social publishing.
-<<<<<<< HEAD
-=======
->>>>>>> 2a72939 (Committing the draft)
->>>>>>> 818904a (Fix CORS middleware settings and update backend API URL)
+AI provider keys are optional. Without them BrandForge runs its clearly labeled demo content engine. Provider OAuth variables in `backend/.env.example` are placeholders only; live social account connection and publishing are not implemented yet.
+
+## Deployment
+
+Deploy the Next.js frontend from `frontend` and set `NEXT_PUBLIC_API_URL` to the HTTPS backend URL. Deploy the FastAPI backend with a persistent disk mounted at `DATA_DIR`, set its `CORS_ORIGINS` to the deployed frontend origin, and configure secure cookie settings above. SQLite data and media must remain on persistent storage.

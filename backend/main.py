@@ -1,8 +1,9 @@
-import os, io, json, uuid, zipfile, sqlite3, threading, mimetypes
+import os, io, json, uuid, zipfile, sqlite3, threading, mimetypes, hashlib, hmac, secrets, re
+from contextvars import ContextVar
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Optional
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel
@@ -10,22 +11,104 @@ import agents as A
 
 DATA = os.getenv("DATA_DIR", "./data"); os.makedirs(DATA + "/media", exist_ok=True)
 DB = DATA + "/brandforge.db"; lock = threading.Lock(); pool = ThreadPoolExecutor(6)
+current_user = ContextVar("current_user", default=None)
 
 def q(sql, args=()):
     with lock, sqlite3.connect(DB, timeout=15) as c:
         cur = c.execute(sql, args); return cur.fetchall()
 q("CREATE TABLE IF NOT EXISTS docs(kind TEXT, id TEXT PRIMARY KEY, parent TEXT, data TEXT)")
-def put(kind, id, data, parent=""): q("INSERT OR REPLACE INTO docs VALUES(?,?,?,?)", (kind, id, parent, json.dumps(data)))
+with sqlite3.connect(DB) as c:
+    cols = [r[1] for r in c.execute("PRAGMA table_info(docs)")]
+    if "user_id" not in cols: c.execute("ALTER TABLE docs ADD COLUMN user_id TEXT")
+    c.execute("CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY,email TEXT UNIQUE,password_hash TEXT,created TEXT)")
+    c.execute("CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY,user_id TEXT,expires REAL)")
+def put(kind, id, data, parent=""):
+    uid = current_user.get()
+    if not uid: raise HTTPException(401, "Sign in required.")
+    with lock, sqlite3.connect(DB, timeout=15) as c:
+        c.execute("INSERT INTO docs(kind,id,parent,data,user_id) VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET kind=excluded.kind,parent=excluded.parent,data=excluded.data WHERE docs.user_id=excluded.user_id", (kind,id,parent,json.dumps(data),uid))
 def get(kind, id):
-    r = q("SELECT data FROM docs WHERE kind=? AND id=?", (kind, id))
+    uid = current_user.get()
+    if not uid: raise HTTPException(401, "Sign in required.")
+    r = q("SELECT data FROM docs WHERE kind=? AND id=? AND user_id=?", (kind, id, uid))
     if not r: raise HTTPException(404, f"{kind} not found")
     return json.loads(r[0][0])
 def listing(kind, parent=None):
-    r = q("SELECT data FROM docs WHERE kind=?" + (" AND parent=?" if parent else ""), (kind, parent) if parent else (kind,))
+    uid = current_user.get()
+    if not uid: raise HTTPException(401, "Sign in required.")
+    sql = "SELECT data FROM docs WHERE kind=? AND user_id=?" + (" AND parent=?" if parent else "")
+    args = (kind, uid, parent) if parent else (kind, uid)
+    r = q(sql, args)
     return [json.loads(x[0]) for x in r]
 
 app = FastAPI(title="BrandForge API")
-app.add_middleware(CORSMiddleware, allow_origins=os.getenv("CORS_ORIGINS", "*").split(","), allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(CORSMiddleware, allow_origins=[x.strip() for x in os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",") if x.strip()], allow_methods=["GET","POST","PUT","DELETE","OPTIONS"], allow_headers=["Content-Type"], allow_credentials=True)
+
+@app.middleware("http")
+async def session_middleware(request: Request, call_next):
+    allowed_origins = [x.strip() for x in os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",") if x.strip()]
+    origin = request.headers.get("origin")
+    if request.method in ("POST", "PUT", "PATCH", "DELETE") and origin not in allowed_origins:
+        return Response(json.dumps({"detail":"Origin not allowed."}), status_code=403, media_type="application/json")
+    sid = request.cookies.get("bf_session")
+    uid = None
+    if sid:
+        row = q("SELECT user_id FROM sessions WHERE id=? AND expires>?", (sid, __import__("time").time()))
+        if row: uid = row[0][0]
+    token = current_user.set(uid)
+    try:
+        public = request.url.path in ("/api/status", "/api/auth/register", "/api/auth/login", "/api/auth/me", "/api/auth/logout")
+        if request.url.path.startswith("/api/") and not public and not uid:
+            return Response(json.dumps({"detail":"Sign in required."}), status_code=401, media_type="application/json")
+        return await call_next(request)
+    finally: current_user.reset(token)
+
+def session_cookie(response: Response, sid: str):
+    same_site = os.getenv("SESSION_COOKIE_SAMESITE", "lax").lower()
+    response.set_cookie("bf_session", sid, httponly=True, secure=os.getenv("SESSION_COOKIE_SECURE", "false").lower()=="true", samesite=same_site, max_age=60*60*24*14, path="/")
+
+def user_info(uid):
+    row = q("SELECT email FROM users WHERE id=?", (uid,))
+    return {"id":uid,"email":row[0][0]} if row else None
+
+class Credentials(BaseModel):
+    email: str
+    password: str
+
+@app.get("/api/auth/me")
+def auth_me(): return {"user": user_info(current_user.get())}
+
+@app.post("/api/auth/register")
+def register(i: Credentials, response: Response):
+    email = i.email.strip().lower()
+    if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email): raise HTTPException(400,"Enter a valid email address.")
+    if len(i.password) < 12: raise HTTPException(400,"Password must be at least 12 characters.")
+    uid = uuid.uuid4().hex; salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", i.password.encode(), salt, 310000)
+    try:
+        with lock, sqlite3.connect(DB) as c: c.execute("INSERT INTO users VALUES(?,?,?,?)", (uid,email,salt.hex()+":"+digest.hex(),datetime.utcnow().isoformat()))
+    except sqlite3.IntegrityError: raise HTTPException(409,"An account with this email already exists.")
+    sid = secrets.token_urlsafe(32)
+    with lock, sqlite3.connect(DB) as c: c.execute("INSERT INTO sessions VALUES(?,?,?)",(sid,uid,__import__("time").time()+60*60*24*14))
+    session_cookie(response,sid); return {"user":user_info(uid)}
+
+@app.post("/api/auth/login")
+def login(i: Credentials, response: Response):
+    email=i.email.strip().lower(); row=q("SELECT id,password_hash FROM users WHERE email=?",(email,))
+    if not row: raise HTTPException(401,"Email or password is incorrect.")
+    uid, stored=row[0]; salt, expected=stored.split(":",1)
+    actual=hashlib.pbkdf2_hmac("sha256",i.password.encode(),bytes.fromhex(salt),310000).hex()
+    if not hmac.compare_digest(actual,expected): raise HTTPException(401,"Email or password is incorrect.")
+    sid=secrets.token_urlsafe(32)
+    with lock, sqlite3.connect(DB) as c: c.execute("INSERT INTO sessions VALUES(?,?,?)",(sid,uid,__import__("time").time()+60*60*24*14))
+    session_cookie(response,sid); return {"user":user_info(uid)}
+
+@app.post("/api/auth/logout")
+def logout(request: Request, response: Response):
+    sid=request.cookies.get("bf_session")
+    if sid:
+        with lock, sqlite3.connect(DB) as c: c.execute("DELETE FROM sessions WHERE id=?",(sid,))
+    response.delete_cookie("bf_session",path="/"); return {"ok":True}
 
 class Brief(BaseModel):
     brand_name: str; product: str; audience: str; industry: str; goal: str; tone: str; description: str
@@ -34,6 +117,36 @@ class Brief(BaseModel):
 
 @app.get("/api/status")
 def status(): return {"engine": A.engine_name(), "llm": A.provider(), "voice": bool(os.getenv("GEMINI_API_KEY")), "images": bool(os.getenv("GEMINI_API_KEY")), "video": False}
+
+@app.get("/api/accounts")
+def accounts():
+    # Report readiness without returning credential values. Connections remain disabled
+    # until an authenticated user/session model is added to enforce account ownership.
+    providers = {
+        "instagram": ("META_APP_ID", "META_APP_SECRET"),
+        "linkedin": ("LINKEDIN_CLIENT_ID", "LINKEDIN_CLIENT_SECRET"),
+        "wordpress": ("WORDPRESS_CLIENT_ID", "WORDPRESS_CLIENT_SECRET"),
+    }
+    configured = {p: all(os.getenv(k) for k in keys) for p, keys in providers.items()}
+    return {"mode": "demo", "accounts": [{"platform": p, "connected": False,
+            "authorization": "Not connected", "account_name": None,
+            "oauth_configured": configured[p], "authorization_available": False,
+            "unavailable_reason": "User authentication and per-user account ownership are not implemented."}
+            for p in providers]}
+
+@app.get("/api/publishing/history")
+def publishing_history(): return listing("publish")
+
+@app.post("/api/publish/{aid}")
+def demo_publish(aid: str, request: dict):
+    asset = get("asset", aid)
+    if not asset.get("approved"): raise HTTPException(400, "Approve this asset before publishing.")
+    platform = request.get("platform")
+    if platform not in ("instagram", "linkedin", "wordpress"): raise HTTPException(400, "Unsupported destination.")
+    record = {"id": uuid.uuid4().hex[:12], "asset_id": aid, "content": asset["text"], "platform": platform,
+              "account": "No live account connected", "status": "DEMO — simulated", "demo": True,
+              "created": datetime.utcnow().isoformat(), "url": None}
+    put("publish", record["id"], record); return record
 
 @app.post("/api/brand/analyze")
 def analyze(b: Brief):
@@ -46,7 +159,27 @@ def brands(): return listing("brand")  # brand memory, reusable for future campa
 
 @app.put("/api/brand/{bid}/kit")
 def edit_kit(bid: str, kit: dict):
-    br = get("brand", bid); br["kit"].update(kit); put("brand", bid, br); return br
+    br = get("brand", bid); br["kit"].update(kit); br["approved"] = False
+    br["updated"] = datetime.utcnow().isoformat(); put("brand", bid, br)
+    for cam in listing("campaign", bid):
+        mark_campaign_review(cam, "Brand kit changed")
+    return br
+
+def mark_campaign_review(cam, reason):
+    cam["review_reason"] = reason
+    for asset in listing("asset", cam["id"]):
+        asset["status"] = "needs_review"; asset["approved"] = False
+        put("asset", asset["id"], asset, cam["id"])
+    put("campaign", cam["id"], cam, cam["brand_id"])
+
+@app.put("/api/brand/{bid}")
+def edit_brand(bid: str, brief: dict):
+    br = get("brand", bid); changed = brief != br["brief"]
+    br["brief"].update(brief)
+    if changed:
+        br["approved"] = False
+        for cam in listing("campaign", bid): mark_campaign_review(cam, "Brand brief changed")
+    put("brand", bid, br); return br
 
 @app.post("/api/brand/{bid}/approve")
 def approve_brand(bid: str):
@@ -65,7 +198,8 @@ def create_campaign(i: CampaignIn):
            "steps": {"brand": "done", "plan": "done"}, "engine": A.engine_name(), "created": datetime.utcnow().isoformat()}
     put("campaign", cid, cam, i.brand_id); return cam
 
-def run_asset(aid):
+def run_asset(aid, uid):
+    user_token = current_user.set(uid)
     a = get("asset", aid); cam = get("campaign", a["campaign_id"])
     try:
         text, meta, eng = A.generate_asset(a["platform"], cam["ctx"], cam["plan"])
@@ -73,18 +207,31 @@ def run_asset(aid):
     except Exception as e:
         a.update(status="error", error=str(e))
     put("asset", aid, a, a["campaign_id"])
+    current_user.reset(user_token)
 
 @app.post("/api/campaign/generate")
 def generate(i: CampaignIn):  # here brand_id field carries the campaign id
-    cam = get("campaign", i.brand_id); cam["status"] = "generating"; put("campaign", cam["id"], cam, cam["brand_id"])
+    uid = current_user.get(); cam = get("campaign", i.brand_id); cam["status"] = "generating"; put("campaign", cam["id"], cam, cam["brand_id"])
     ids = []
     for p in [x["platform"] for x in cam["plan"]["platforms"]]:
         fmt = A.PLAN_FORMATS[p]; aid = uuid.uuid4().hex[:10]; ids.append(aid)
         put("asset", aid, {"id": aid, "campaign_id": cam["id"], "platform": p, "format": fmt[0], "ratio": fmt[1], "summary": fmt[2], "status": "generating", "text": "", "meta": {}, "critic": None, "versions": [], "approved": False}, cam["id"])
     def finish():
-        list(pool.map(run_asset, ids)); c = get("campaign", cam["id"]); c["status"] = "ready"; put("campaign", c["id"], c, c["brand_id"])
+        user_token = current_user.set(uid)
+        list(pool.map(lambda aid: run_asset(aid, uid), ids)); c = get("campaign", cam["id"]); c["status"] = "ready"; put("campaign", c["id"], c, c["brand_id"])
+        current_user.reset(user_token)
     threading.Thread(target=finish, daemon=True).start()
     return {"started": ids}
+
+@app.put("/api/campaign/{cid}")
+def edit_campaign(cid: str, plan: dict):
+    cam = get("campaign", cid)
+    if plan != cam["plan"]:
+        cam["plan"].update(plan)
+        br = get("brand", cam["brand_id"])
+        cam["ctx"] = A.make_ctx(br["kit"], cam["plan"])
+        mark_campaign_review(cam, "Campaign strategy changed")
+    put("campaign", cid, cam, cam["brand_id"]); return cam
 
 @app.get("/api/campaign/{cid}")
 def campaign(cid: str):

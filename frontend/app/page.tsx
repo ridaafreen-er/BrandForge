@@ -9,7 +9,7 @@ const DEMO = { brand_name: "Brew & Bloom", product: "Cold brew coffee", audience
   tone: "Playful, youthful, energetic", description: "A local cafe serving fresh, affordable coffee to busy students.", key_message: "Affordable cold brew for busy students.", avoid: "cheap", colors: "", website: "", platforms: PLATS };
 
 async function api(path: string, method = "GET", body?: any) {
-  const r = await fetch(API + path, { method, headers: body ? { "Content-Type": "application/json" } : undefined, body: body ? JSON.stringify(body) : undefined });
+  const r = await fetch(API + path, { method, credentials: "include", headers: body ? { "Content-Type": "application/json" } : undefined, body: body ? JSON.stringify(body) : undefined });
   if (!r.ok) { let m = r.statusText; try { m = (await r.json()).detail || m; } catch {} throw new Error(m); }
   return r;
 }
@@ -31,9 +31,15 @@ export default function App() {
   const [sys, setSys] = useState<any>(null);
   const [edit, setEdit] = useState<any>(null);
   const [demo, setDemo] = useState(false);
+  const [history, setHistory] = useState<any[]>([]);
+  const [accounts, setAccounts] = useState<any[]>([]);
+  const [user, setUser] = useState<any>(null);
+  const [authReady, setAuthReady] = useState(false);
   const poll = useRef<any>(null);
 
   useEffect(() => { J("/api/status").then(setSys).catch(() => setErr(`Can't reach the API at ${API}. Start the backend (see README).`)); }, []);
+  useEffect(() => { J("/api/auth/me").then(x=>setUser(x.user)).catch(()=>{}).finally(()=>setAuthReady(true)); }, []);
+  useEffect(() => { if(user) J("/api/accounts").then((x) => setAccounts(x.accounts)).catch(() => {}); }, [user]);
   const run = async (label: string, fn: () => Promise<void>) => { setBusy(label); setErr(""); try { await fn(); } catch (e: any) { setErr(e.message || "Something went wrong"); } setBusy(""); };
 
   const analyze = (f = form) => run("Analyzing your brand…", async () => { setBrand(await J("/api/brand/analyze", "POST", f)); setView("kit"); });
@@ -60,22 +66,31 @@ export default function App() {
     const r = await api(`/api/export/${cam.id}`, "POST"); const u = URL.createObjectURL(await r.blob());
     const l = document.createElement("a"); l.href = u; l.download = `brandforge-${cam.id}.zip`; l.click(); URL.revokeObjectURL(u);
   });
+  const openHistory = () => run("Loading history…", async () => { setHistory(await J("/api/publishing/history")); setView("history"); });
+  const simulate = (a: any, platform: string) => run("Creating demo preview…", async () => { await J(`/api/publish/${a.id}`, "POST", { platform }); setHistory(await J("/api/publishing/history")); setView("history"); });
+  const stages = [{id:"brief", label:"Brand Brief"},{id:"kit",label:"AI Brand Kit"},{id:"plan",label:"Campaign Strategy"},{id:"gen",label:"AI Content Generation"},{id:"board",label:"Content Review"},{id:"accounts",label:"Connect Accounts"},{id:"publish",label:"Publish"},{id:"history",label:"Publishing History"}];
+  const canStage = (id: string) => id === "brief" || (id === "kit" && !!brand) || (id === "plan" && !!cam) || (["gen","board","publish","history"].includes(id) && !!cam) || id === "accounts";
 
   return (
     <main className="min-h-screen font-body">
+      {!authReady ? <Section title="BrandForge" sub="Loading your account…" /> : !user ? <AuthPanel onSuccess={setUser} /> : <>
       <header className="sticky top-0 z-30 flex items-center justify-between border-b border-line bg-ink/90 px-6 py-3 backdrop-blur">
         <button onClick={() => setView("landing")} className="font-display text-xl font-bold tracking-tight">Brand<span className="text-ember">Forge</span></button>
-        <div className="flex items-center gap-3 text-xs text-mute">
+        <div className="flex flex-wrap items-center gap-2 text-xs text-mute">
           {sys && <span>Backend {sys.version} · {sys.engine}</span>}
+          <button className="btn-ghost" onClick={() => setView("accounts")}>Connected Accounts</button><button className="btn-ghost" onClick={openHistory}>Publishing History</button>
+          <span>{user.email}</span><button className="btn-ghost" onClick={()=>run("Signing out…",async()=>{await J("/api/auth/logout","POST",{});setUser(null);setBrand(null);setCam(null);setView("landing")})}>Sign out</button>
           {view !== "landing" && <button className="btn-ghost" onClick={() => { setView("brief"); setBrand(null); setCam(null); }}>New campaign</button>}
         </div>
       </header>
+      {view !== "landing" && <nav aria-label="Campaign workflow" className="mx-auto flex max-w-6xl flex-wrap gap-2 px-6 pt-5">{stages.map((s,i)=><button key={s.id} disabled={!canStage(s.id)} onClick={()=>{if(s.id==="brief"&&brand)setForm(brand.brief);setView(s.id)}} className={`rounded-full border px-3 py-1 text-xs ${view===s.id?"border-ember text-ember":"border-line text-mute"}`}>{i+1}. {s.label}</button>)}</nav>}
       {err && <div role="alert" className="mx-auto mt-4 max-w-4xl rounded-lg border border-bad/40 bg-bad/10 px-4 py-3 text-sm text-bad">{err}</div>}
       {busy && <div className="fixed bottom-5 right-5 z-40 rounded-lg border border-line bg-panel px-4 py-2 text-sm"><span className="mr-2 inline-block h-2 w-2 animate-pulse rounded-full bg-ember" />{busy}</div>}
 
       {view === "landing" && <Landing onStart={() => setView("brief")} onDemo={startDemo} />}
 
       {view === "brief" && <Section title="Describe your brand once" sub="Required fields marked *. Everything else sharpens the result.">
+        {brand && <button className="btn-ghost mb-4" onClick={()=>run("Saving brief…",async()=>{const b=await J(`/api/brand/${brand.id}`,"PUT",form);setBrand(b);setView("kit");})}>Save Changes</button>}
         <form className="grid gap-4 md:grid-cols-2" onSubmit={(e) => { e.preventDefault(); analyze(); }}>
           {([["brand_name", "Brand name *"], ["product", "Product / service *"], ["audience", "Target audience *"], ["industry", "Industry *"], ["goal", "Campaign goal *"], ["campaign", "Campaign name"], ["tone", "Brand tone *"], ["website", "Website URL"], ["key_message", "Key message"], ["avoid", "Things to avoid (comma separated)"], ["colors", "Preferred colors (hex, comma separated)"]] as any[]).map(([k, l]) => (
             <div key={k}><label className="lbl" htmlFor={k}>{l}</label><input id={k} className="inp" required={l.includes("*")} value={form[k] || ""} onChange={(e) => setForm({ ...form, [k]: e.target.value })} /></div>))}
@@ -95,10 +110,11 @@ export default function App() {
           <Card t="Palette"><div className="flex gap-2">{brand.kit.colors.map((c: string) => <div key={c} title={c} className="h-10 w-10 rounded-md border border-line" style={{ background: c }} />)}</div></Card>
           <div className="md:col-span-3"><Card t="Summary & positioning">{brand.kit.summary}<br /><span className="text-mute">{brand.kit.positioning}</span></Card></div>
         </div>
-        <button className="btn-primary mt-6" onClick={approve} disabled={!!busy}>Approve brand kit</button>
+        <div className="mt-6 flex gap-2"><button className="btn-ghost" onClick={()=>{setForm(brand.brief);setView("brief")}}>Edit Brand Brief</button><button className="btn-primary" onClick={approve} disabled={!!busy}>Approve brand kit</button></div>
       </Section>}
 
       {view === "plan" && cam && <Section title={cam.plan.name} sub="Campaign plan. Review it, then generate.">
+        <PlanEditor cam={cam} onSave={async(plan:any)=>run("Saving strategy…",async()=>{const c=await J(`/api/campaign/${cam.id}`,"PUT",plan);setCam({...c,assets:await J(`/api/campaign/${cam.id}/assets`)});})}/>
         <div className="grid gap-4 md:grid-cols-2">
           <Card t="Objective">{cam.plan.objective}</Card><Card t="Core idea">{cam.plan.idea}</Card><Card t="Hook">{cam.plan.hook}</Card><Card t="Key message / CTA">{cam.plan.keyMessage}<br /><b>{cam.plan.CTA}</b></Card>
           <Card t="Content strategy">{cam.plan.contentStrategy}</Card><Card t="Platform strategy">{cam.plan.platformStrategy}</Card>
@@ -108,6 +124,7 @@ export default function App() {
       </Section>}
 
       {view === "gen" && <Section title="Forging your campaign" sub="Agents run in parallel. Status below is read from the server.">
+        <button className="btn-ghost mb-3" onClick={()=>setView("plan")}>Previous: Campaign Strategy</button>
         <ul className="max-w-md space-y-2 text-sm">
           {[["Brand analysis", "done"], ["Campaign planning", "done"], ...assets.map((a) => [LABEL[a.platform], a.status === "ready" ? "done" : a.status === "error" ? "error" : "generating"])].map(([n, s]: any) => (
             <li key={n} className="flex justify-between rounded-lg border border-line bg-panel px-4 py-2"><span>{n}</span><span className={s === "done" ? "text-ok" : s === "error" ? "text-bad" : "text-ember"}>{s === "done" ? "✓" : s === "error" ? "Failed" : "Generating…"}</span></li>))}
@@ -117,16 +134,27 @@ export default function App() {
 
       {view === "board" && cam && <Section title={`${cam.ctx.brandName} — ${cam.plan.name}`} sub={`${readyN}/${assets.length} READY`}>
         {cam.engine === "demo" && <Note>Demo engine: content below is template-generated, not from an external AI API. Add an API key to the backend for real generation.</Note>}
-        <div className="mb-4 flex gap-2"><button className="btn-primary" onClick={doExport}>Export campaign</button><button className="btn-ghost" onClick={() => navigator.clipboard.writeText(report())}>Copy all</button></div>
+        {cam.review_reason && <Note>Needs Review: {cam.review_reason}. Review and approve the affected assets again.</Note>}
+        <div className="mb-4 flex gap-2"><button className="btn-primary" onClick={doExport}>Export campaign</button><button className="btn-ghost" onClick={() => navigator.clipboard.writeText(report())}>Copy all</button><button className="btn-ghost" onClick={()=>setView("publish")}>Continue to Publish</button></div>
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">{assets.map((a) => <AssetCard key={a.id} a={a} cam={cam} onEdit={() => setEdit(a)} onRegen={() => regen(a)} onApprove={() => approveAsset(a)} onGenerateImages={() => generateImages(a)} imageEnabled={Boolean(sys?.images)} />)}</div>
       </Section>}
 
+      {view === "accounts" && <Section title="Connected Accounts" sub="No live accounts are connected. Credentials and connection states are never shown as connected unless confirmed by the provider."><Note>DEMO MODE — Authorization is disabled until BrandForge has user authentication and per-user account ownership. Provider credentials are checked server-side and never returned.</Note><div className="grid gap-4 md:grid-cols-3">{["instagram","linkedin","wordpress"].map(p=>{const a=accounts.find((x:any)=>x.platform===p);return <div key={p} className="rounded-xl border border-line bg-panel p-5"><div className="font-display text-xl">{LABEL[p] || "WordPress"}</div><p className="my-3 text-sm text-mute">Status: Not connected · Authorization: Not granted</p><p className="mb-3 text-xs text-mute">OAuth app: {a?.oauth_configured?"Credentials configured":"Credentials not configured"}</p><button className="btn-ghost" disabled={!a?.authorization_available}>Connect Account</button></div>})}</div></Section>}
+
+      {view === "publish" && cam && <Section title="Publish" sub="Choose an approved asset and preview a clearly labeled demo result."><Note>DEMO MODE — This simulates workflow history only. It does not connect accounts, publish content, or create a live post URL.</Note><div className="grid gap-4 md:grid-cols-2">{assets.map(a=><div key={a.id} className="rounded-xl border border-line bg-panel p-4"><h2 className="font-display text-lg">{LABEL[a.platform]}</h2><p className="my-2 line-clamp-4 whitespace-pre-wrap text-sm">{a.text}</p><p className="mb-3 text-xs text-mute">{a.approved?"Approved":"Needs approval"}</p>{["instagram","linkedin","wordpress"].map(p=><button key={p} className="btn-ghost mr-2 mt-2" disabled={!a.approved} onClick={()=>simulate(a,p)}>Preview {p} · DEMO</button>)}</div>)}</div></Section>}
+
+      {view === "history" && <Section title="Publishing History" sub="Demo previews are labeled and contain no fabricated live URLs."><div className="overflow-x-auto rounded-xl border border-line"><table className="w-full text-left text-sm"><thead className="bg-panel text-mute"><tr>{["Content","Platform","Account","Status","Date","Action"].map(x=><th key={x} className="p-3">{x}</th>)}</tr></thead><tbody>{history.map(h=><tr key={h.id} className="border-t border-line"><td className="p-3">{h.content?.slice(0,70)}</td><td className="p-3">{h.platform}</td><td className="p-3">{h.account}</td><td className="p-3">{h.status}</td><td className="p-3">{new Date(h.created+"Z").toLocaleString()}</td><td className="p-3">{h.url ? <a href={h.url}>View</a> : "Preview only"}</td></tr>)}{!history.length&&<tr><td className="p-4 text-mute" colSpan={6}>No publishing activity yet.</td></tr>}</tbody></table></div></Section>}
+
       {edit && <Editor a={assets.find((x) => x.id === edit.id) || edit} onClose={() => setEdit(null)} onChange={async () => { await refresh(); }} regen={regen} setBusy={setBusy} setErr={setErr} />}
+      </>}
     </main>
   );
 }
 
+function AuthPanel({onSuccess}:any){const [mode,setMode]=useState("login");const [email,setEmail]=useState("");const [password,setPassword]=useState("");const [error,setError]=useState("");const [busy,setBusy]=useState(false);const submit=async(e:any)=>{e.preventDefault();setBusy(true);setError("");try{const r=await api(`/api/auth/${mode}`,"POST",{email,password});onSuccess((await r.json()).user)}catch(ex:any){setError(ex.message)}finally{setBusy(false)}};return <Section title={mode==="login"?"Welcome back":"Create your BrandForge account"} sub="Your campaigns and connected accounts are private to your account."><form onSubmit={submit} className="max-w-md space-y-4 rounded-xl border border-line bg-panel p-5"><label className="lbl block">Email<input required type="email" autoComplete="email" className="inp mt-1" value={email} onChange={e=>setEmail(e.target.value)}/></label><label className="lbl block">Password<input required type="password" minLength={mode==="register"?12:1} autoComplete={mode==="login"?"current-password":"new-password"} className="inp mt-1" value={password} onChange={e=>setPassword(e.target.value)}/>{mode==="register"&&<span className="mt-1 block text-xs text-mute">Use at least 12 characters.</span>}</label>{error&&<p role="alert" className="text-sm text-bad">{error}</p>}<button className="btn-primary" disabled={busy}>{busy?"Please wait…":mode==="login"?"Sign in":"Create account"}</button><p className="text-sm text-mute">{mode==="login"?"New to BrandForge?":"Already have an account?"} <button type="button" className="text-steel underline" onClick={()=>{setMode(mode==="login"?"register":"login");setError("")}}>{mode==="login"?"Register":"Sign in"}</button></p></form></Section>}
+
 function Section({ title, sub, children }: any) { return <div className="mx-auto max-w-6xl px-6 py-10"><h1 className="font-display text-3xl font-bold">{title}</h1><p className="mb-6 mt-1 text-mute">{sub}</p>{children}</div>; }
+function PlanEditor({cam,onSave}:any){const [editing,setEditing]=useState(false);const [draft,setDraft]=useState<any>(cam.plan);useEffect(()=>setDraft(cam.plan),[cam]);return <div className="mb-4 flex flex-wrap gap-2">{editing&&["name","objective","idea","keyMessage","CTA","contentStrategy"].map(k=><label key={k} className="min-w-[220px] flex-1 text-xs text-mute">{k}<input className="inp mt-1" value={draft[k]||""} onChange={e=>setDraft({...draft,[k]:e.target.value})}/></label>)}{editing?<><button className="btn-primary self-end" onClick={()=>{onSave(draft);setEditing(false)}}>Save Changes</button><button className="btn-ghost self-end" onClick={()=>{setDraft(cam.plan);setEditing(false)}}>Cancel</button></>:<button className="btn-ghost" onClick={()=>setEditing(true)}>Edit Strategy</button>}</div>}
 function Card({ t, children }: any) { return <div className="rounded-xl border border-line bg-panel p-4"><div className="mb-1 text-xs text-mute">{t}</div><div className="text-sm leading-relaxed">{children}</div></div>; }
 function Note({ children }: any) { return <div className="mb-4 rounded-lg border border-steel/30 bg-steel/10 px-4 py-2 text-xs text-steel">{children}</div>; }
 
